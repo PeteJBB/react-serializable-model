@@ -46,7 +46,6 @@ export default class Customer extends SerializableModel {
 ```
 
 ## Attribute options
-
 You can configure your attributes with the following options
 
 ### Type
@@ -54,8 +53,12 @@ Values: number | boolean | string | array | enum
 Usage e.g attr('string')
 
 ### Serialize: false  
-When set, this field will not be serialized back to the API. It is only used for deserializaing records.
+When set, this field will not be serialized back to the API. It is only used for deserializaing records.  
 Usage `age: attr('number', { deserialize: false})`
+
+### EnumType
+When attr type is set to `enum` this property determines the enum-type to use. Pass in a reference to the Enum class.  
+Usage: see #Enums below
 
 ## Usage
 When loading records, call the static function `deserialize` to instantiate the model
@@ -72,3 +75,47 @@ fetch(`api/customer/1`, {
 })
 ```
 
+## Enums
+This library also includes a basic Enum implementation. Define your enum by extending `/enums/Enum` and defining your values
+
+```javascript
+import Enum from "./Enum";
+
+class Country extends Enum {
+    static get name() { return 'Country'; }
+
+    Australia = 'Australia';
+    UnitedKingdom = 'UnitedKingdom';
+}
+
+export default new Country();
+```
+
+This enum can then be used in your models. In this way you can have a set of defined values for enum fields and if the API gives you unexpected values you will see errors in the console (development only)
+
+```javascript
+import SerializableModel from "./SerializableModel";
+import Country from '../enums/Country';
+const {
+    attr
+} = SerializableModel;
+
+export default class Address extends SerializableModel {
+    country = attr('enum', { enumType: Country });
+    // etc
+}
+```
+
+The enum can be used in code logic anywhere you need e.g
+```javascript
+let country = customer.address.country;
+switch(customer.address.country) {
+    case Country.Australia:
+       console.log("g'day");
+       break;
+    case Country.UnitedKingdom:
+    default:
+        console.log("'allo guv'na");
+        break;
+}
+```

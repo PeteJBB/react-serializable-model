@@ -1,0 +1,324 @@
+import {
+    setProperties,
+    isNone,
+    camelizeObject,
+    classifyObject,
+    assert,
+    isEmpty,
+} from '../utils/helpers';
+
+const AttrFieldDef = function(type, options) {
+    this.key = null; // filled in by getFieldDefs
+    this.type = type;
+    setProperties(this, options);
+};
+const FragmentFieldDef = function(type, options) {
+    this.key = null; // filled in by getFieldDefs
+    this.type = type;
+    setProperties(this, options);
+};
+const FragmentArrayFieldDef = function(type, options) {
+    this.key = null; // filled in by getFieldDefs
+    this.type = type;
+    setProperties(this, options);
+};
+
+/** The base model type for pretty much anything that comes from or is posted to the API
+ * Api fields are defined each subclass
+ * e.g class MyModel = {
+ *     id = attr('number');
+ *     name = attr('string', { defaultValue: 'default name' });
+ *     address = fragment(Address);
+ * }
+*/
+class SerializableModel {
+    static isSerializableModel = true;
+
+    toString() {
+        const constructorName = this.constructor.name;
+        return `<${constructorName}:${this.id || this.name}>`;
+    }
+
+    /**
+     * Create a new instance of this model and assign any initial values directly
+     * Use this instead of calling new Type() in most situations
+    **/
+    static create(props) {
+        // create a copy of props to work with
+        let initialVals = {};
+        if(typeof props === 'object') {
+            Object.assign(initialVals, props);
+        }
+
+        // replace all field defs with initial or default values
+        let fieldDefs = this.getFieldDefs();
+        for(let key in fieldDefs) {
+            let def = fieldDefs[key];
+
+            // if a value was passed in with options then use that
+            // otherwise look for the defaultValue on the def
+            let val = initialVals[key];
+            if(typeof val === 'undefined') {
+                val = def.defaultValue;
+            }
+
+            if (def instanceof AttrFieldDef || def instanceof FragmentFieldDef) {
+                initialVals[key] = getValueOrDefault(def, val);
+            }
+            else if(def instanceof FragmentArrayFieldDef) {
+                initialVals[key] = val || [];
+            }
+        }
+
+        let instance = new this();
+        Object.assign(instance, initialVals);
+        return instance;
+    }
+
+    /** Takes in a JSON string or POJO and applies the values to a
+     * new instance of the model using the properties set up in field defs
+     */
+    static deserialize(json) {
+        if (typeof json === 'string') {
+            json = JSON.parse(json);
+        }
+        Object.freeze(json);
+
+        let camelizedJson = camelizeObject(json);
+        if (camelizedJson === null || camelizedJson === undefined) {
+            return null;
+        }
+
+        let fieldDefs = this.getFieldDefs();
+        let modelParams = Object.keys(fieldDefs).reduce((obj, key) => {
+            let def = fieldDefs[key];
+            let apiKey = (def && def.apiKey) || key;
+            let val = camelizedJson[apiKey];
+
+            if (def instanceof AttrFieldDef) {
+                obj[key] = getValueOrDefault(def, val);
+            }
+            else if (def instanceof FragmentFieldDef) {
+                // fragments are defined in another model and deserialized there
+                // in this case val is more json
+                obj[key] = def.type.deserialize(val);
+
+            }
+            else if (def instanceof FragmentArrayFieldDef) {
+                // expect val is an array of json fragments
+                if(Array.isArray(val)) {
+                    obj[key] = val.map(v =>
+                        def.type.deserialize(v)
+                    );
+                }
+                else {
+                    obj[key] = [];
+                }
+            }
+            return obj;
+        }, {});
+
+        let instance = this.create(modelParams);
+        return instance;
+    }
+
+    /**
+     * Converts the model into a Classified POJO for posting to the API
+     */
+    serialize(options) {
+        // default options
+        options = typeof options === 'object' ? options : {};
+
+        let fieldDefs = this.constructor.getFieldDefs();
+        let result = Object.keys(fieldDefs).reduce((obj, key) => {
+            let def = fieldDefs[key];
+            let apiKey = (def && def.apiKey) || key;
+
+            if (def.serialize !== false) {
+                let val = this[key];
+                if (def instanceof FragmentFieldDef) {
+                    // fragments are defined in another model and serialized there
+                    if (val) {
+                        if (val.serialize) {
+                            val = val.serialize(options);
+                        }
+                        else if(def.type && def.type.serialize) {
+                            // Backwards compatible with old models.
+                            // The def options become part of the def itself
+                            // (e.g. useCommon for products) — pass that through
+                            val = def.type.serialize(val, def);
+                        }
+                        else {
+                            console.warn(`Unable to to serialize ${key} in ${this} with value ${val}`);
+                            val = null;
+                        }
+                    }
+                    else {
+                        val = null;
+                    }
+                }
+                else if (def instanceof FragmentArrayFieldDef) {
+                    // serialize array of objects
+                    if(Array.isArray(val)) {
+                        val = val.map(v => v && v.serialize ?
+                            v.serialize(options) :
+                            null
+                        );
+                    }
+                    val = val || [];
+                }
+
+                obj[apiKey] = val;
+            }
+
+            return obj;
+        }, {});
+
+        return classifyObject(result);
+    }
+
+    clone() {
+        // When cloning we want to make sure all fragments are cloned as well
+        // so convert the whole structure to a JSON string and re-parse it
+
+        let fieldDefs = this.constructor.getFieldDefs();
+        let json = Object.keys(fieldDefs).reduce((obj, key) => {
+            let def = fieldDefs[key];
+            let result;
+            if(def instanceof AttrFieldDef) {
+                result = this[key];
+            }
+            else if(def instanceof FragmentFieldDef) {
+                let val = this[key];
+                result = val && val.clone ?
+                    val.clone() :
+                    JSON.parse(JSON.stringify(val));
+            }
+            else if(def instanceof FragmentArrayFieldDef) {
+                let arr = this[key];
+                result = Array.isArray(arr) ?
+                    arr.map(val => val && val.clone ?
+                        val.clone() :
+                        JSON.parse(JSON.stringify(val))
+                    ) :
+                    JSON.parse(JSON.stringify(arr));
+            }
+            obj[key] = result;
+            return obj;
+        }, {});
+
+        return this.constructor.create(json);
+    }
+
+    isEqual(toModel) {
+        let fields = this.getFieldNames();
+        return fields.every(
+            key => this[key] === toModel[key]
+        );
+    }
+
+    static getFieldNames() {
+        return Object.keys(this.getFieldDefs());
+    }
+
+    /**
+     * Look at all the attrs/fragments of this class and return them in a dictionary.
+     * Since properties can only be iterated once the model is instantiated
+     * the first time this is called for a type a new instance will be created.
+     * The result is cached on the constructor object for futher calls of the same type
+     **/
+    static getFieldDefs() {
+        // look for pre-calculated value
+        // `this` refers to the class type since this is a static function
+        if(this._fieldDefs) {
+            return this._fieldDefs;
+        }
+        // no defs have been cached for this type yet, work it out now
+        // instantiate using the safetyCheck:true param
+        // this tells the constructor that this is the special valid case
+        // and to allow instatiating directly
+        let proto = new this({safetyCheck: true});
+        let fieldDefs = {};
+        for (let key in proto) {
+            let def = proto[key];
+            if (def instanceof AttrFieldDef ||
+                def instanceof FragmentFieldDef ||
+                def instanceof FragmentArrayFieldDef
+            ) {
+                def.key = key;
+                fieldDefs[key] = def;
+            }
+        }
+
+        // cache this result on the class type for next time
+        this._fieldDefs = fieldDefs;
+        return fieldDefs;
+    }
+
+}
+
+SerializableModel.attr = function(type, options) {
+    return new AttrFieldDef(type, options);
+};
+
+SerializableModel.fragment = function(type, options) {
+    return new FragmentFieldDef(type, options);
+};
+
+SerializableModel.fragmentArray = function(type, options) {
+    return new FragmentArrayFieldDef(type, options);
+};
+
+/**
+ * Check an parse a value based on field type
+ * If val is undefined then return a default value for the type
+ **/
+function getValueOrDefault(fieldDef, val) {
+    if (isEmpty(val)) {
+        // look for defaultValue on definition
+        let defaultVal = typeof fieldDef.defaultValue === 'function' ?
+            fieldDef.defaultValue() :
+            fieldDef.defaultValue;
+        if(typeof defaultVal !== 'undefined') {
+            return defaultVal;
+        }
+
+        // default defaults by type
+        switch (fieldDef.type) {
+            case 'number':
+                return null;
+            case 'boolean':
+                return false;
+            case 'string':
+                return '';
+            case 'enum':
+                return null;
+            case 'array':
+                return [];
+        }
+    }
+    else if (typeof val === 'function') {
+        return val();
+    }
+
+    switch(fieldDef.type) {
+        case 'string':
+            return isNone(val) ? '' : String(val);
+        case 'number':
+            return isNaN(val) ? 0 : parseFloat(val);
+        case 'boolean':
+            return !!JSON.parse(val); // will convert bool strings to actual bool (e.g 'true' => true)
+        case 'array':
+            return Array.isArray(val) ? val : [];
+        case 'enum':
+            // make sure enum is a known value
+            assert(
+                fieldDef.enumType.hasValue(val),
+                `Unknown ${fieldDef.enumType.constructor.name} enum value: ${val}`
+            );
+    }
+
+    return val;
+}
+
+export default SerializableModel;
